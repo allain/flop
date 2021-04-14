@@ -65,8 +65,9 @@ func TestCanWireUpNodes(t *testing.T) {
 	n1 := newNode(&echo{})
 	n2 := newNode(&echo{})
 
-	err := n1.Pipe(n2)
-	if err != nil {
+	result := n1.Pipe(n2)
+	if result != n2 {
+		t.Log("expected Pipe to return target node")
 		t.Fail()
 	}
 
@@ -76,15 +77,13 @@ func TestCanWireUpNodes(t *testing.T) {
 	}
 }
 
-func TestCanUnwireNodes(t *testing.T) {
+func TestCanWireUpNodesAsChain(t *testing.T) {
 	n1 := newNode(&echo{})
 	n2 := newNode(&echo{})
+	n3 := newNode(&echo{})
 
-	n1.Pipe(n2)
-	n1.Unpipe(n2)
-
-	if len(n1.outs) != 0 {
-		t.Log("expected node not to be in outs")
+	result := n1.Pipe(n2).Pipe(n3)
+	if result != n3 {
 		t.Fail()
 	}
 }
@@ -94,24 +93,19 @@ func TestErrorsWhenNodeAlreadyPiped(t *testing.T) {
 	n2 := newNode(&echo{})
 
 	n1.Pipe(n2)
-	err := n1.Pipe(n2)
 
-	if err == nil {
-		t.Log("expected error on duplicate Pipe")
-		t.Fail()
-	}
-}
+	defer func() {
+		err := recover()
+		if err == nil {
+			t.Log("expected error on duplicate Pipe")
+			t.Fail()
+		}
+	}()
 
-func TestErrorsWhenRemovingMissingNode(t *testing.T) {
-	n1 := newNode(&echo{})
-	n2 := newNode(&echo{})
+	n1.Pipe(n2)
 
-	err := n1.Unpipe(n2)
-
-	if err == nil {
-		t.Log("unpiping missing node should error")
-		t.Fail()
-	}
+	t.Log("should panic when piping to same node twice")
+	t.FailNow()
 }
 
 func TestCommandRunnerWorks(t *testing.T) {
@@ -213,8 +207,7 @@ func TestRunnerPipes(t *testing.T) {
 	n2 := newNode(&double{})
 	n3 := newNode(&double{})
 
-	n1.Pipe(n2)
-	n2.Pipe(n3)
+	n1.Pipe(n2).Pipe(n3)
 
 	stdin := strings.NewReader("1\n2\n")
 	stdout := &bytes.Buffer{}
@@ -268,14 +261,21 @@ func TestRunnerCanFanOut(t *testing.T) {
 	}
 
 	outStr := stdout.String()
+	lines := strings.Split(outStr, "\n")
+
+	if len(lines) != 5 {
+		t.Logf("expected 5 lines but received %d", len(lines))
+		t.FailNow()
+	}
+
 	if outStr != "HELLO\nWORLD\nhello\nworld\n" {
 		t.Logf("expected stdout to match HELLO\nWORLD\nhello\nworld\n but was: %s", outStr)
-		t.Fail()
+		t.FailNow()
 	}
 
 	errStr := stderr.String()
 	if errStr != "" {
 		t.Logf("expected no output on stderr: %s", outStr)
-		t.Fail()
+		t.FailNow()
 	}
 }
