@@ -26,46 +26,11 @@ type command struct {
 
 func (n *command) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	cmd := exec.Command(n.cmd[0], n.cmd[1:]...)
-	cmdIn, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("unable to get stdin: %v", err)
-	}
-	defer cmdIn.Close()
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
-	cmdOut, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("unable to get stdout: %v", err)
-	}
-
-	cmdErr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("unable to get stderr: %v", err)
-	}
-
-	wg := sync.WaitGroup{}
-	wg.Add(3)
-
-	go func() {
-		io.Copy(cmdIn, stdin)
-		cmdIn.Close()
-		wg.Done()
-	}()
-
-	go func() {
-		io.Copy(stdout, cmdOut)
-		wg.Done()
-	}()
-
-	go func() {
-		io.Copy(stderr, cmdErr)
-		wg.Done()
-	}()
-
-	cmd.Start()
-	cmd.Wait()
-	wg.Wait()
-
-	return nil
+	return cmd.Run()
 }
 
 func newNode(r runner) *node {
@@ -89,7 +54,8 @@ func (n *node) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 		panic("TODO: handle more than one piped runner")
 	}
 
-	r, w, _ := os.Pipe()
+	r, w := io.Pipe()
+	defer w.Close()
 
 	wg := sync.WaitGroup{}
 
@@ -103,6 +69,7 @@ func (n *node) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 
 	err := n.runner.Run(stdin, w, stderr)
 
+	// let the runner know there's not going to be any more data coming
 	w.Close()
 
 	wg.Wait()
