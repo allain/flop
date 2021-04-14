@@ -10,23 +10,23 @@ import (
 	"testing"
 )
 
-type echoRunner struct {
+type echo struct {
 	runner
 }
 
 // copies input to output
-func (er *echoRunner) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+func (er *echo) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	io.Copy(stdout, stdin)
 	return nil
 }
 
-type doubleRunner struct {
+type double struct {
 	runner
 }
 
 // reads integers off stdin one at a time and sends their double to stdout
 // if an error occurs, it's printed to stderr
-func (dr *doubleRunner) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+func (dr *double) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	r := bufio.NewReader(stdin)
 	w := bufio.NewWriter(stdout)
 	e := bufio.NewWriter(stderr)
@@ -62,8 +62,8 @@ func (dr *doubleRunner) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer)
 }
 
 func TestCanWireUpNodes(t *testing.T) {
-	n1 := newNode(&echoRunner{})
-	n2 := newNode(&echoRunner{})
+	n1 := newNode(&echo{})
+	n2 := newNode(&echo{})
 
 	err := n1.Pipe(n2)
 	if err != nil {
@@ -77,8 +77,8 @@ func TestCanWireUpNodes(t *testing.T) {
 }
 
 func TestCanUnwireNodes(t *testing.T) {
-	n1 := newNode(&echoRunner{})
-	n2 := newNode(&echoRunner{})
+	n1 := newNode(&echo{})
+	n2 := newNode(&echo{})
 
 	n1.Pipe(n2)
 	n1.Unpipe(n2)
@@ -90,8 +90,8 @@ func TestCanUnwireNodes(t *testing.T) {
 }
 
 func TestErrorsWhenNodeAlreadyPiped(t *testing.T) {
-	n1 := newNode(&echoRunner{})
-	n2 := newNode(&echoRunner{})
+	n1 := newNode(&echo{})
+	n2 := newNode(&echo{})
 
 	n1.Pipe(n2)
 	err := n1.Pipe(n2)
@@ -103,8 +103,8 @@ func TestErrorsWhenNodeAlreadyPiped(t *testing.T) {
 }
 
 func TestErrorsWhenRemovingMissingNode(t *testing.T) {
-	n1 := newNode(&echoRunner{})
-	n2 := newNode(&echoRunner{})
+	n1 := newNode(&echo{})
+	n2 := newNode(&echo{})
 
 	err := n1.Unpipe(n2)
 
@@ -146,7 +146,7 @@ func TestCommandRunnerWorks(t *testing.T) {
 }
 
 func TestDoubleRunnerWorks(t *testing.T) {
-	c := doubleRunner{}
+	c := double{}
 
 	stdin := strings.NewReader("1\n2\n3")
 	stdout := &bytes.Buffer{}
@@ -177,7 +177,7 @@ func TestDoubleRunnerWorks(t *testing.T) {
 }
 
 func TestNodeRunnerWorks(t *testing.T) {
-	n := newNode(&echoRunner{})
+	n := newNode(&echo{})
 
 	stdin := strings.NewReader("This is a test!")
 	stdout := &bytes.Buffer{}
@@ -209,10 +209,12 @@ func TestNodeRunnerWorks(t *testing.T) {
 }
 
 func TestRunnerPipes(t *testing.T) {
-	n1 := newNode(&doubleRunner{})
-	n2 := newNode(&doubleRunner{})
+	n1 := newNode(&double{})
+	n2 := newNode(&double{})
+	n3 := newNode(&double{})
 
 	n1.Pipe(n2)
+	n2.Pipe(n3)
 
 	stdin := strings.NewReader("1\n2\n")
 	stdout := &bytes.Buffer{}
@@ -230,8 +232,44 @@ func TestRunnerPipes(t *testing.T) {
 	}
 
 	outStr := stdout.String()
-	if outStr != "4\n8\n" {
-		t.Logf("expected stdout to match 4\n8\n but was: %s", outStr)
+	if outStr != "8\n16\n" {
+		t.Logf("expected stdout to match 8\n16\n but was: %s", outStr)
+		t.Fail()
+	}
+
+	errStr := stderr.String()
+	if errStr != "" {
+		t.Logf("expected no output on stderr: %s", outStr)
+		t.Fail()
+	}
+}
+
+func TestRunnerCanFanOut(t *testing.T) {
+	n1 := newNode(&echo{})
+	n2 := newNode(newCommand("awk", "{print toupper($0)}"))
+	n3 := newNode(newCommand("awk", "{print tolower($0)}"))
+
+	n1.Pipe(n2)
+	n1.Pipe(n3)
+
+	stdin := strings.NewReader("Hello\nWorld\n")
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	err := n1.Run(stdin, stdout, stderr)
+	if err != nil {
+		t.Log("Error while running program")
+		t.Fail()
+	}
+
+	if stdin.Len() != 0 {
+		t.Log("expected stdin to be read completely")
+		t.Fail()
+	}
+
+	outStr := stdout.String()
+	if outStr != "HELLO\nWORLD\nhello\nworld\n" {
+		t.Logf("expected stdout to match HELLO\nWORLD\nhello\nworld\n but was: %s", outStr)
 		t.Fail()
 	}
 

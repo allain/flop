@@ -10,13 +10,29 @@ import (
 	"sync"
 )
 
+type logged struct {
+	reader io.Reader
+	writer io.Writer
+}
+
+func (lw *logged) Read(p []byte) (int, error) {
+	n, err := lw.reader.Read(p)
+	log.Printf("read %d %v", n, err)
+	return n, err
+}
+
+func (lw *logged) Write(p []byte) (int, error) {
+	n, err := lw.writer.Write(p)
+	log.Printf("write %d %v", n, err)
+	return n, err
+}
+
 type runner interface {
 	Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error
 }
 
 func newCommand(cmd string, args ...string) *command {
 	c := command{cmd: append([]string{cmd}, args...)}
-
 	return &c
 }
 
@@ -35,7 +51,6 @@ func (n *command) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error
 
 func newNode(r runner) *node {
 	n := node{runner: r}
-
 	return &n
 }
 
@@ -51,7 +66,37 @@ func (n *node) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	}
 
 	if len(n.outs) > 1 {
-		panic("TODO: handle more than one piped runner")
+		wg := sync.WaitGroup{}
+
+		childWriters := make([]io.Writer, len(n.outs))
+		childReaders := make([]*io.PipeReader, len(n.outs))
+
+		for i, out := range n.outs {
+			wg.Add(1)
+			r, w := io.Pipe()
+			childWriters[i] = w
+			childReaders[i] = r
+
+			go func(out runner, r *io.PipeReader, w *io.PipeWriter) {
+				defer w.Close()
+				out.Run(r, stdout, stderr)
+				wg.Done()
+			}(out, r, w)
+		}
+
+		w := io.MultiWriter(childWriters...)
+		err := n.runner.Run(stdin, w, stderr)
+
+		// let the child runners know there's not going to be any more data coming
+		for _, cr := range childReaders {
+			// childWriters[i].(*io.PipeWriter).Close()
+			cr.Close()
+		}
+
+		wg.Wait()
+
+		return err
+
 	}
 
 	r, w := io.Pipe()
@@ -150,9 +195,21 @@ func example4() {
 	n1.Run(strings.NewReader(""), os.Stdout, os.Stderr)
 }
 
+func example5() {
+	log.Println("Example 5")
+	n1 := newNode(newCommand("ping", "-c", "3", "www.google.com"))
+	n2 := newNode(newCommand("awk", "{print toupper($0)}"))
+	n3 := newNode(newCommand("awk", "{print tolower($0)}"))
+
+	n1.Pipe(n2)
+	n1.Pipe(n3)
+	n1.Run(strings.NewReader(""), os.Stdout, os.Stderr)
+}
+
 func main() {
-	example1()
-	example2()
-	example3()
-	example4()
+	// example1()
+	// example2()
+	// example3()
+	// example4()
+	example5()
 }
