@@ -1,8 +1,24 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"strconv"
+	"time"
 )
+
+type counter2 struct {
+	n     int
+	delay time.Duration
+}
+
+func (c *counter2) Run(in <-chan string, out chan<- string) error {
+	for i := 0; i < c.n; i++ {
+		out <- strconv.Itoa(i)
+		time.Sleep(c.delay)
+	}
+
+	return nil
+}
 
 func runNode(n *node) error {
 	in := make(chan string)
@@ -11,7 +27,7 @@ func runNode(n *node) error {
 	out := make(chan string)
 	go func() {
 		for line := range out {
-			log.Println(line, out)
+			fmt.Println(line)
 		}
 	}()
 
@@ -22,53 +38,21 @@ func runNode(n *node) error {
 	return err
 }
 
-func example1() {
-	log.Println("Example 1")
-	n1 := newNode(newCommand("date"))
-
-	runNode(n1)
-}
-
-func example2() {
-	log.Println("Example 2")
-	n1 := newNode(newCommand("date"))
-	n2 := newNode(newCommand("awk", "{print tolower($0)}"))
-	n1.Pipe(n2)
-
-	runNode(n1)
-}
-
-func example3() {
-	log.Println("Example 3")
-	n1 := newNode(newCommand("ping", "-c", "3", "www.google.com"))
-	runNode(n1)
-}
-
-func example4() {
-	log.Println("Example 4")
-	n1 := newNode(newCommand("ping", "-c", "3", "www.google.com"))
-	n2 := newNode(newCommand("awk", "{print toupper($0)}"))
-
-	n1.Pipe(n2)
-	runNode(n1)
-}
-
-func example5() {
-	log.Println("Example 5")
-	n1 := newNode(newCommand("ping", "-c", "10", "www.google.com"))
-	n2 := newNode(newCommand("awk", "{print toupper($0)}"))
-	n3 := newNode(newCommand("awk", "{print tolower($0)}"))
-
-	n1.Pipe(n2)
-	n1.Pipe(n3)
-
-	runNode(n1)
-}
-
 func main() {
-	// example1()
-	// example2()
-	// example3()
-	example4()
-	// example5()
+	fmt.Println("Piping of interactive program")
+	countRunner := counter2{n: 3, delay: time.Millisecond * 1000}
+	catRunner := newCommand("cat")
+	example1 := newNode(&countRunner)
+	example1.Pipe(newNode(catRunner))
+	runNode(example1)
+
+	fmt.Println("Example 5 - Fanout")
+	pingRunner := newCommand("ping", "-c", "3", "www.google.com")
+	upperRunner := newCommand("awk", "{print toupper($0); fflush()}")
+	lowerRunner := newCommand("awk", "{print tolower($0); fflush()}")
+	example2 := newNode(pingRunner)
+	example2.Pipe(newNode(upperRunner))
+	example2.Pipe(newNode(lowerRunner))
+	runNode(example2)
+
 }

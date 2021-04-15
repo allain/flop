@@ -4,11 +4,53 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+type counter struct {
+	n int
+}
+
+func (c *counter) Run(in <-chan string, out chan<- string) error {
+	for n := 1; n <= c.n; n++ {
+		out <- strconv.Itoa(n)
+	}
+
+	return nil
+}
+
+func TestCounter(t *testing.T) {
+	c := counter{n: 3}
+
+	in := make(chan string)
+	close(in)
+
+	out := make(chan string)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		assert.Equal(t, "1", <-out)
+		assert.Equal(t, "2", <-out)
+		assert.Equal(t, "3", <-out)
+
+		val, ok := <-out
+		assert.Equal(t, "", val)
+		assert.False(t, ok)
+		wg.Done()
+	}()
+
+	err := c.Run(in, out)
+	assert.NoError(t, err)
+
+	close(out)
+
+	wg.Wait()
+}
 
 type echo struct{}
 
@@ -21,21 +63,83 @@ func (er *echo) Run(in <-chan string, out chan<- string) error {
 	return nil
 }
 
+func TestEcho(t *testing.T) {
+	e := echo{}
+	in := make(chan string, 10)
+	in <- "A"
+	in <- "B"
+	in <- "C"
+	in <- ""
+	close(in)
+
+	out := make(chan string)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		assert.Equal(t, "A", <-out)
+		assert.Equal(t, "B", <-out)
+		assert.Equal(t, "C", <-out)
+		assert.Equal(t, "", <-out)
+
+		val, ok := <-out
+		assert.Equal(t, "", val)
+		assert.False(t, ok)
+		wg.Done()
+	}()
+
+	err := e.Run(in, out)
+	assert.NoError(t, err)
+	close(out)
+	wg.Wait()
+
+}
+
 type double struct{}
 
 // reads integers off stdin one at a time and sends their double to stdout
-// if an error occurs, it's printed to stderr
 func (dr *double) Run(in <-chan string, out chan<- string) error {
 	for line := range in {
 		number, err := strconv.ParseInt(line, 10, 64)
 		if err != nil {
-			return err
+			number = 0
 		}
 
 		out <- fmt.Sprintf("%d", number*2)
 	}
 
 	return nil
+}
+
+func TestDouble(t *testing.T) {
+	d := double{}
+	in := make(chan string, 10)
+	in <- "1"
+	in <- "3"
+	in <- "5"
+	in <- ""
+	close(in)
+
+	out := make(chan string)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		assert.Equal(t, "2", <-out)
+		assert.Equal(t, "6", <-out)
+		assert.Equal(t, "10", <-out)
+		assert.Equal(t, "0", <-out)
+
+		val, ok := <-out
+		assert.Equal(t, "", val)
+		assert.False(t, ok)
+		wg.Done()
+	}()
+
+	err := d.Run(in, out)
+	assert.NoError(t, err)
+	close(out)
+	wg.Wait()
 }
 
 func TestCanWireUpNodes(t *testing.T) {
@@ -168,10 +272,10 @@ func TestRunnerPipes(t *testing.T) {
 	assert.Equal(t, []string{"8", "16"}, collectStrings(out))
 }
 
-func skipTestWaitsForAllChildrenToFinish(t *testing.T) {
+func TestWaitsForAllChildrenToFinish(t *testing.T) {
 	n1 := newNode(&echo{})
-	n2 := newNode(newCommand("sleep", "1"))
-	n3 := newNode(newCommand("sleep", "1"))
+	n2 := newNode(newCommand("sleep", "0.01"))
+	n3 := newNode(newCommand("sleep", "0.01"))
 
 	n1.Pipe(n2)
 	n1.Pipe(n3)
@@ -186,19 +290,18 @@ func skipTestWaitsForAllChildrenToFinish(t *testing.T) {
 	start := time.Now()
 	err := n1.Run(in, out)
 	assert.NoError(t, err)
+	close(out)
 
-	// close(out)
-	// close(problems)
 	end := time.Now()
 
 	duration := end.Sub(start)
-	if duration.Milliseconds() < 1000 {
-		assert.FailNow(t, "should have ran for at least 1 second but ran for %dms", duration.Milliseconds())
-	}
 
-	if duration.Milliseconds() > 2000 {
-		assert.FailNow(t, "should have run all nodes in parallel but seems they ran sequentially %dms", duration.Milliseconds())
-	}
+	assert.GreaterOrEqual(t, duration.Milliseconds(), int64(10),
+		"should have ran for at least 10 millis but ran for %dms",
+		duration.Milliseconds())
+
+	assert.Less(t, duration.Milliseconds(), int64(20),
+		"should have run all nodes in parallel but seems they ran sequentially")
 }
 
 func TestRunnerCanFanOut(t *testing.T) {
@@ -231,18 +334,6 @@ func TestRunnerCanFanOut(t *testing.T) {
 	assert.Equal(t, []string{"HELLO", "WORLD", "hello", "world"}, []string(s))
 }
 
-type counter struct {
-	n int
-}
-
-func (c *counter) Run(in <-chan string, out chan<- string) error {
-	for i := 0; i < c.n; i++ {
-		out <- strconv.Itoa(i)
-	}
-
-	return nil
-}
-
 func benchmarkLeaf(b *testing.B, runBuilder func() runner) {
 	for i := 0; i < b.N; i++ {
 		n1 := newNode(runBuilder())
@@ -269,7 +360,7 @@ func BenchmarkLeaf(b *testing.B) {
 }
 
 func BenchmarkLeafCommand(b *testing.B) {
-	benchmarkLeaf(b, func() runner { return newCommand("echo", "hello") })
+	benchmarkLeaf(b, func() runner { return newCommand("cat") })
 }
 
 func benchmarkChain(n int, b *testing.B, runBuilder func() runner) {

@@ -1,9 +1,8 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"fmt"
-	"io"
 	"os/exec"
 	"sync"
 
@@ -23,55 +22,47 @@ type command struct {
 	cmd []string
 }
 
-type chanReader struct {
-	c   <-chan string
-	buf bytes.Buffer
-}
-
-func (c *chanReader) Read(p []byte) (int, error) {
-	line, ok := <-c.c
-	if !ok {
-		return 0, io.EOF
-	}
-
-	c.buf.WriteString(line)
-	c.buf.WriteRune('\n')
-
-	return c.buf.Read(p)
-}
-
-type chanWriter struct {
-	c   chan<- string
-	buf bytes.Buffer
-}
-
-func (cw *chanWriter) Write(p []byte) (int, error) {
-	n, err := cw.buf.Write(p)
-	if err != nil {
-		return 0, err
-	}
-
-	for {
-		line, err := cw.buf.ReadString('\n')
-		if err != nil {
-			break
-		}
-		cw.c <- line[:len(line)-1]
-	}
-
-	return n, err
-}
-
 func (n *command) Run(in <-chan string, out chan<- string) (err error) {
 	cmd := exec.Command(n.cmd[0], n.cmd[1:]...)
 
-	inReader := chanReader{c: in}
-	cmd.Stdin = &inReader
+	wg := sync.WaitGroup{}
 
-	outWriter := chanWriter{c: out}
-	cmd.Stdout = &outWriter
+	inPipe, _ := cmd.StdinPipe()
+	wg.Add(1)
+	go func() {
+		for line := range in {
+			inPipe.Write([]byte(line))
+			inPipe.Write([]byte("\n"))
+		}
 
-	return cmd.Run()
+		// let ran program know no more data is coming
+		inPipe.Close()
+
+		wg.Done()
+	}()
+
+	// Create a scanner which scans r in a line-by-line fashion
+	outPipe, _ := cmd.StdoutPipe()
+	scanner := bufio.NewScanner(outPipe)
+
+	wg.Add(1)
+
+	go func() {
+
+		// Read line by line and process it
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line != "" {
+				out <- line
+			}
+		}
+		wg.Done()
+	}()
+
+	// Start the command and check for errors
+	err = cmd.Run()
+	wg.Wait()
+	return err
 }
 
 func newNode(r runner) *node {
@@ -96,7 +87,7 @@ func (n *node) Run(in <-chan string, out chan<- string) (err error) {
 	for i, child := range n.outs {
 		wg.Add(1)
 
-		childIn := make(chan string)
+		childIn := make(chan string, 100)
 		childIns = append(childIns, childIn)
 
 		go func(r runner, i int) {
@@ -108,13 +99,14 @@ func (n *node) Run(in <-chan string, out chan<- string) (err error) {
 		}(child, i)
 	}
 
-	childrenInChan := make(chan string)
+	childrenInChan := make(chan string, 100)
 	go func() {
 		for line := range childrenInChan {
 			for _, childIn := range childIns {
 				childIn <- line
 			}
 		}
+
 		for _, childIn := range childIns {
 			close(childIn)
 		}
