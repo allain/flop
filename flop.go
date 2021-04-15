@@ -1,32 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"sync"
+
+	multierror "github.com/hashicorp/go-multierror"
 )
 
-type logged struct {
-	reader io.Reader
-	writer io.Writer
-}
-
-func (lw *logged) Read(p []byte) (int, error) {
-	n, err := lw.reader.Read(p)
-	log.Printf("read %d %v", n, err)
-	return n, err
-}
-
-func (lw *logged) Write(p []byte) (int, error) {
-	n, err := lw.writer.Write(p)
-	log.Printf("write %d %v", n, err)
-	return n, err
-}
-
 type runner interface {
-	Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error
+	Run(in <-chan string, out chan<- string) error
 }
 
 func newCommand(cmd string, args ...string) *command {
@@ -38,11 +23,53 @@ type command struct {
 	cmd []string
 }
 
-func (n *command) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+type chanReader struct {
+	c   <-chan string
+	buf bytes.Buffer
+}
+
+func (c *chanReader) Read(p []byte) (int, error) {
+	line, ok := <-c.c
+	if !ok {
+		return 0, io.EOF
+	}
+
+	c.buf.WriteString(line)
+	c.buf.WriteRune('\n')
+
+	return c.buf.Read(p)
+}
+
+type chanWriter struct {
+	c   chan<- string
+	buf bytes.Buffer
+}
+
+func (cw *chanWriter) Write(p []byte) (int, error) {
+	n, err := cw.buf.Write(p)
+	if err != nil {
+		return 0, err
+	}
+
+	for {
+		line, err := cw.buf.ReadString('\n')
+		if err != nil {
+			break
+		}
+		cw.c <- line[:len(line)-1]
+	}
+
+	return n, err
+}
+
+func (n *command) Run(in <-chan string, out chan<- string) (err error) {
 	cmd := exec.Command(n.cmd[0], n.cmd[1:]...)
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+
+	inReader := chanReader{c: in}
+	cmd.Stdin = &inReader
+
+	outWriter := chanWriter{c: out}
+	cmd.Stdout = &outWriter
 
 	return cmd.Run()
 }
@@ -57,63 +84,48 @@ type node struct {
 	outs   []*node
 }
 
-func (n *node) Run(stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+func (n *node) Run(in <-chan string, out chan<- string) (err error) {
 	if len(n.outs) == 0 {
-		// simple case where it's a leaf node, just do the work
-		return n.runner.Run(stdin, stdout, stderr)
+		return n.runner.Run(in, out)
 	}
-
-	if len(n.outs) > 1 {
-		wg := sync.WaitGroup{}
-
-		childWriters := make([]io.Writer, len(n.outs))
-		childReaders := make([]*io.PipeReader, len(n.outs))
-
-		for i, out := range n.outs {
-			wg.Add(1)
-			r, w := io.Pipe()
-			childWriters[i] = w
-			childReaders[i] = r
-
-			go func(out runner, r *io.PipeReader, w *io.PipeWriter) {
-				defer w.Close()
-				out.Run(r, stdout, stderr)
-				wg.Done()
-			}(out, r, w)
-		}
-
-		w := io.MultiWriter(childWriters...)
-		err := n.runner.Run(stdin, w, stderr)
-
-		// let the child runners know there's not going to be any more data coming
-		for _, cr := range childReaders {
-			// childWriters[i].(*io.PipeWriter).Close()
-			cr.Close()
-		}
-
-		wg.Wait()
-
-		return err
-
-	}
-
-	r, w := io.Pipe()
-	defer w.Close()
 
 	wg := sync.WaitGroup{}
 
-	for _, out := range n.outs {
+	childIns := []chan string{}
+
+	for i, child := range n.outs {
 		wg.Add(1)
-		go func(out runner) {
-			out.Run(r, stdout, stderr)
+
+		childIn := make(chan string)
+		childIns = append(childIns, childIn)
+
+		go func(r runner, i int) {
+			childErr := r.Run(childIn, out)
+			if childErr != nil {
+				err = multierror.Append(err, childErr)
+			}
 			wg.Done()
-		}(out)
+		}(child, i)
 	}
 
-	err := n.runner.Run(stdin, w, stderr)
+	childrenInChan := make(chan string)
+	go func() {
+		for line := range childrenInChan {
+			for _, childIn := range childIns {
+				childIn <- line
+			}
+		}
+		for _, childIn := range childIns {
+			close(childIn)
+		}
+	}()
 
-	// let the runner know there's not going to be any more data coming
-	w.Close()
+	rootErr := n.runner.Run(in, childrenInChan)
+	if rootErr != nil {
+		err = multierror.Append(err, rootErr)
+	}
+
+	close(childrenInChan)
 
 	wg.Wait()
 
